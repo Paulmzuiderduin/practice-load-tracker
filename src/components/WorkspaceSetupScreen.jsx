@@ -20,6 +20,8 @@ const WorkspaceSetupScreen = ({
   renameTeam,
   deleteTeam,
   openFeatureRequestDialog,
+  onSendFeedback,
+  onOpenPrivacy,
   setActiveTab,
   overlays
 }) => (
@@ -164,17 +166,31 @@ const WorkspaceSetupScreen = ({
       <div className="flex flex-wrap items-center justify-between gap-2 rounded-2xl bg-white/70 px-4 py-3 shadow-sm">
         <span>© {new Date().getFullYear()} Practice Load & Injury-Prevention Tracker</span>
         <div className="flex items-center gap-4">
-          {openFeatureRequestDialog && (
-            <button
-              className="font-semibold text-cyan-700 underline decoration-transparent transition hover:decoration-current"
-              onClick={openFeatureRequestDialog}
-            >
-              Send feedback
-            </button>
-          )}
+          <button
+            className="font-semibold text-cyan-700 underline decoration-transparent transition hover:decoration-current"
+            onClick={() => {
+              if (onSendFeedback) {
+                onSendFeedback();
+                return;
+              }
+              if (openFeatureRequestDialog) {
+                openFeatureRequestDialog();
+                return;
+              }
+              window.location.href = 'mailto:info@paulzuiderduin.com';
+            }}
+          >
+            Send feedback
+          </button>
           <button
             className="font-semibold text-slate-700 underline decoration-transparent transition hover:decoration-current"
-            onClick={() => setActiveTab('privacy')}
+            onClick={() => {
+              if (onOpenPrivacy) {
+                onOpenPrivacy();
+                return;
+              }
+              setActiveTab('privacy');
+            }}
           >
             Privacy
           </button>
