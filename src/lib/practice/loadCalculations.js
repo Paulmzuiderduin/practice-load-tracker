@@ -55,23 +55,34 @@ export const groupSessionsByWeek = (sessions = []) => {
   return map;
 };
 
-const summarizeWeekTeam = (sessions, prehabItems) => {
+const summarizeWeekTeam = (sessions, roster, prehabItems) => {
   const totals = sessions.reduce(
     (acc, session) => {
       const duration = Number(session.durationMinutes || 0);
-      const rpe = Number(session.rpe || 0);
-      const load = calculateSessionLoad(duration, rpe);
+      const rpeByPlayer = session.rpeByPlayer || {};
+      const sessionTotals = roster.reduce(
+        (playerAcc, player) => {
+          const status = session.attendance?.[player.id] || 'absent';
+          const weight = ATTENDANCE_WEIGHTS[status] ?? 0;
+          if (weight <= 0) return playerAcc;
+          const rpe = Number(rpeByPlayer[player.id] || 0);
+          const minutes = duration * weight;
+          playerAcc.minutes += minutes;
+          playerAcc.load += calculateSessionLoad(minutes, rpe);
+          return playerAcc;
+        },
+        { minutes: 0, load: 0 }
+      );
       const compliance = calculatePrehabCompliance(session.prehab || {}, prehabItems);
-      acc.minutes += duration;
-      acc.load += load;
-      acc.rpeWeighted += rpe * duration;
+      acc.minutes += sessionTotals.minutes;
+      acc.load += sessionTotals.load;
       acc.prehabPctTotal += compliance.pct;
       acc.sessionCount += 1;
       return acc;
     },
-    { minutes: 0, load: 0, rpeWeighted: 0, prehabPctTotal: 0, sessionCount: 0 }
+    { minutes: 0, load: 0, prehabPctTotal: 0, sessionCount: 0 }
   );
-  const avgRpe = totals.minutes ? totals.rpeWeighted / totals.minutes : 0;
+  const avgRpe = totals.minutes ? totals.load / totals.minutes : 0;
   const avgPrehab = totals.sessionCount ? totals.prehabPctTotal / totals.sessionCount : 0;
   return {
     totalMinutes: Math.round(totals.minutes),
@@ -88,18 +99,17 @@ const summarizeWeekPlayer = (sessions, playerId, prehabItems) => {
       const weight = ATTENDANCE_WEIGHTS[status] ?? 0;
       if (weight <= 0) return acc;
       const duration = Number(session.durationMinutes || 0) * weight;
-      const rpe = Number(session.rpe || 0);
+      const rpe = Number(session.rpeByPlayer?.[playerId] || 0);
       const load = calculateSessionLoad(duration, rpe);
       acc.minutes += duration;
       acc.load += load;
-      acc.rpeWeighted += rpe * duration;
       acc.sessionCount += 1;
       acc.prehabPctTotal += calculatePrehabCompliance(session.prehab || {}, prehabItems).pct;
       return acc;
     },
-    { minutes: 0, load: 0, rpeWeighted: 0, sessionCount: 0, prehabPctTotal: 0 }
+    { minutes: 0, load: 0, sessionCount: 0, prehabPctTotal: 0 }
   );
-  const avgRpe = totals.minutes ? totals.rpeWeighted / totals.minutes : 0;
+  const avgRpe = totals.minutes ? totals.load / totals.minutes : 0;
   const avgPrehab = totals.sessionCount ? totals.prehabPctTotal / totals.sessionCount : 0;
   return {
     totalMinutes: Math.round(totals.minutes),
@@ -114,7 +124,7 @@ export const buildWeeklySummaries = ({ sessions = [], roster = [], prehabItems =
   const weeks = Array.from(grouped.keys()).sort();
   const team = weeks.map((weekStart) => ({
     weekStart,
-    ...summarizeWeekTeam(grouped.get(weekStart) || [], prehabItems)
+    ...summarizeWeekTeam(grouped.get(weekStart) || [], roster, prehabItems)
   }));
   const players = roster.reduce((acc, player) => {
     acc[player.id] = weeks.map((weekStart) => ({

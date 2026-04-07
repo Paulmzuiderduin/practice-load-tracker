@@ -19,10 +19,10 @@ const emptyForm = (prehabItems) => ({
   id: '',
   date: new Date().toISOString().slice(0, 10),
   durationMinutes: '',
-  rpe: 5,
   focus: focusOptions[0],
   notes: '',
   attendance: {},
+  rpeByPlayer: {},
   prehab: prehabItems.reduce((acc, item) => {
     acc[item.id] = false;
     return acc;
@@ -57,12 +57,54 @@ const SessionsView = ({ teamId, toast, confirmAction }) => {
     [sessions]
   );
 
+  const getSessionTotals = (session) => {
+    const duration = Number(session.durationMinutes || 0);
+    if (!roster.length || !duration) {
+      return { totalMinutes: duration, totalLoad: calculateSessionLoad(duration, 0), avgRpe: 0 };
+    }
+    const totals = roster.reduce(
+      (acc, player) => {
+        const status = session.attendance?.[player.id] || 'absent';
+        const weight = status === 'present' ? 1 : status === 'limited' ? 0.5 : 0;
+        if (weight <= 0) return acc;
+        const minutes = duration * weight;
+        const rpe = Number(session.rpeByPlayer?.[player.id] || 0);
+        acc.totalMinutes += minutes;
+        acc.totalLoad += calculateSessionLoad(minutes, rpe);
+        return acc;
+      },
+      { totalMinutes: 0, totalLoad: 0 }
+    );
+    const avgRpe = totals.totalMinutes ? totals.totalLoad / totals.totalMinutes : 0;
+    return { ...totals, avgRpe };
+  };
+
   const handleAttendanceChange = (playerId, status) => {
+    setForm((prev) => {
+      const nextRpeByPlayer = { ...prev.rpeByPlayer };
+      if (status === 'absent') {
+        delete nextRpeByPlayer[playerId];
+      } else if (!nextRpeByPlayer[playerId]) {
+        nextRpeByPlayer[playerId] = 5;
+      }
+      return {
+        ...prev,
+        attendance: {
+          ...prev.attendance,
+          [playerId]: status
+        },
+        rpeByPlayer: nextRpeByPlayer
+      };
+    });
+  };
+
+  const handleRpeChange = (playerId, value) => {
+    const parsed = Number(value);
     setForm((prev) => ({
       ...prev,
-      attendance: {
-        ...prev.attendance,
-        [playerId]: status
+      rpeByPlayer: {
+        ...prev.rpeByPlayer,
+        [playerId]: Number.isFinite(parsed) ? parsed : ''
       }
     }));
   };
@@ -86,8 +128,15 @@ const SessionsView = ({ teamId, toast, confirmAction }) => {
     if (!form.date) return 'Select a session date.';
     const duration = Number(form.durationMinutes);
     if (!Number.isFinite(duration) || duration <= 0) return 'Enter a valid duration in minutes.';
-    const rpe = Number(form.rpe);
-    if (!Number.isFinite(rpe) || rpe < 1 || rpe > 10) return 'RPE must be between 1 and 10.';
+    const requiresRpe = Object.entries(form.attendance).filter(
+      ([, status]) => status === 'present' || status === 'limited'
+    );
+    for (const [playerId] of requiresRpe) {
+      const rpe = Number(form.rpeByPlayer?.[playerId]);
+      if (!Number.isFinite(rpe) || rpe < 1 || rpe > 10) {
+        return 'Enter a 1-10 RPE for every present/limited player.';
+      }
+    }
     return '';
   };
 
@@ -100,7 +149,7 @@ const SessionsView = ({ teamId, toast, confirmAction }) => {
     const payload = {
       ...form,
       durationMinutes: Number(form.durationMinutes),
-      rpe: Number(form.rpe),
+      rpeByPlayer: form.rpeByPlayer || {},
       updated_at: new Date().toISOString(),
       created_at: form.created_at || new Date().toISOString()
     };
@@ -125,7 +174,7 @@ const SessionsView = ({ teamId, toast, confirmAction }) => {
     setForm({
       ...session,
       durationMinutes: String(session.durationMinutes || ''),
-      rpe: Number(session.rpe || 5),
+      rpeByPlayer: session.rpeByPlayer || {},
       attendance: session.attendance || {},
       prehab: session.prehab || {}
     });
@@ -175,17 +224,6 @@ const SessionsView = ({ teamId, toast, confirmAction }) => {
               />
             </label>
             <label className="text-xs font-semibold text-slate-500">
-              RPE (1-10)
-              <input
-                className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm"
-                type="number"
-                min="1"
-                max="10"
-                value={form.rpe}
-                onChange={(event) => setForm((prev) => ({ ...prev, rpe: event.target.value }))}
-              />
-            </label>
-            <label className="text-xs font-semibold text-slate-500">
               Focus
               <select
                 className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm"
@@ -232,16 +270,28 @@ const SessionsView = ({ teamId, toast, confirmAction }) => {
               <div className="mt-3 space-y-2">
                 {roster.map((player) => (
                   <div key={player.id} className="flex items-center justify-between text-sm text-slate-600">
-                    <span>{player.name}</span>
-                    <select
-                      className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs"
-                      value={form.attendance[player.id] || 'absent'}
-                      onChange={(event) => handleAttendanceChange(player.id, event.target.value)}
-                    >
-                      <option value="present">Present</option>
-                      <option value="limited">Limited</option>
-                      <option value="absent">Absent</option>
-                    </select>
+                    <span className="min-w-[120px]">{player.name}</span>
+                    <div className="flex items-center gap-2">
+                      <select
+                        className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs"
+                        value={form.attendance[player.id] || 'absent'}
+                        onChange={(event) => handleAttendanceChange(player.id, event.target.value)}
+                      >
+                        <option value="present">Present</option>
+                        <option value="limited">Limited</option>
+                        <option value="absent">Absent</option>
+                      </select>
+                      <input
+                        className="w-16 rounded-lg border border-slate-200 px-2 py-1 text-xs"
+                        type="number"
+                        min="1"
+                        max="10"
+                        placeholder="RPE"
+                        value={form.rpeByPlayer[player.id] ?? ''}
+                        onChange={(event) => handleRpeChange(player.id, event.target.value)}
+                        disabled={form.attendance[player.id] === 'absent' || !form.attendance[player.id]}
+                      />
+                    </div>
                   </div>
                 ))}
               </div>
@@ -283,6 +333,8 @@ const SessionsView = ({ teamId, toast, confirmAction }) => {
             <div className="mt-4 space-y-3">
               {sortedSessions.map((session) => {
                 const compliance = calculatePrehabCompliance(session.prehab, settings.prehabItems);
+                const totals = getSessionTotals(session);
+                const avgRpeLabel = totals.avgRpe ? totals.avgRpe.toFixed(1) : '—';
                 return (
                   <div key={session.id} className="rounded-xl border border-slate-100 px-4 py-3">
                     <div className="flex flex-wrap items-center justify-between gap-2">
@@ -291,8 +343,7 @@ const SessionsView = ({ teamId, toast, confirmAction }) => {
                           {session.date} · {session.focus}
                         </div>
                         <div className="text-xs text-slate-500">
-                          {session.durationMinutes} min · RPE {session.rpe} · Load{' '}
-                          {calculateSessionLoad(session.durationMinutes, session.rpe)}
+                          {session.durationMinutes} min · Avg RPE {avgRpeLabel} · Team load {Math.round(totals.totalLoad)}
                         </div>
                       </div>
                       <div className="text-xs font-semibold text-slate-600">

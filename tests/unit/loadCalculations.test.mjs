@@ -24,22 +24,22 @@ test('buildWeeklySummaries aggregates team and player load', () => {
     {
       date: '2026-03-23',
       durationMinutes: 60,
-      rpe: 5,
       attendance: { p1: 'present', p2: 'absent' },
+      rpeByPlayer: { p1: 5 },
       prehab: { nordic: true }
     },
     {
       date: '2026-03-25',
       durationMinutes: 30,
-      rpe: 4,
       attendance: { p1: 'limited', p2: 'present' },
+      rpeByPlayer: { p1: 4, p2: 4 },
       prehab: { nordic: false }
     },
     {
       date: '2026-03-30',
       durationMinutes: 60,
-      rpe: 6,
       attendance: { p1: 'present', p2: 'absent' },
+      rpeByPlayer: { p1: 6 },
       prehab: { nordic: true }
     }
   ];

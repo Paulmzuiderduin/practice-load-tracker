@@ -35,8 +35,8 @@ const HelpView = () => (
               <span className="font-semibold text-slate-800">Player</span>: id, name, position, status, notes
             </div>
             <div>
-              <span className="font-semibold text-slate-800">Session</span>: date, durationMinutes, rpe, focus,
-              attendance{`{playerId: status}`}, prehab{`{itemId: boolean}`}
+              <span className="font-semibold text-slate-800">Session</span>: date, durationMinutes, focus,
+              attendance{`{playerId: status}`}, rpeByPlayer{`{playerId: 1-10}`}, prehab{`{itemId: boolean}`}
             </div>
             <div>
               <span className="font-semibold text-slate-800">Injury</span>: playerId, date, bodyPart, type, severity,
