@@ -1,0 +1,274 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="description"
+      content="Water Polo Hub for shotmaps, scoring events, stat sheets, and video workflows. Built as a practical water polo statistics and scoring app."
+    />
+    <meta
+      name="keywords"
+      content="water polo statistics, water polo statistics app, water polo scoring app, waterpolo shotmap, water polo analytics, water polo video analysis"
+    />
+    <meta name="robots" content="index, follow" />
+    <meta name="theme-color" content="#256af4" />
+
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Waterpolo Hub" />
+    <meta property="og:title" content="Waterpolo Hub | Shotmap, Scoring & Video Analysis" />
+    <meta
+      property="og:description"
+      content="Track and analyze water polo performance with shotmaps, scoring logs, possession maps, and local video snippets."
+    />
+    <meta property="og:url" content="https://waterpolo.paulzuiderduin.com/" />
+    <meta property="og:image" content="https://waterpolo.paulzuiderduin.com/logos/waterpolo-logo-light.png" />
+
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Waterpolo Hub | Shotmap, Scoring & Video Analysis" />
+    <meta
+      name="twitter:description"
+      content="Track and analyze water polo performance with shotmaps, scoring logs, possession maps, and local video snippets."
+    />
+    <meta name="twitter:image" content="https://waterpolo.paulzuiderduin.com/logos/waterpolo-logo-light.png" />
+
+    <link rel="canonical" href="https://waterpolo.paulzuiderduin.com/" />
+    <link rel="sitemap" type="application/xml" href="/sitemap.xml" />
+    <link rel="manifest" href="/site.webmanifest" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <title>Waterpolo Hub | Shotmap, Scoring & Video Analysis</title>
+    <script type="application/ld+json" id="seo-jsonld-default">
+      {
+        "@context": "https://schema.org",
+        "@type": "SoftwareApplication",
+        "name": "Waterpolo Hub",
+        "applicationCategory": "SportsApplication",
+        "operatingSystem": "Web",
+        "url": "https://waterpolo.paulzuiderduin.com/",
+        "description": "Waterpolo Hub helps coaches and players track shotmaps, scoring events, possessions, and video snippets in one platform.",
+        "inLanguage": "en",
+        "offers": {
+          "@type": "Offer",
+          "price": "0",
+          "priceCurrency": "EUR"
+        },
+        "creator": {
+          "@type": "Person",
+          "name": "Paul Zuiderduin"
+        }
+      }
+    </script>
+  
+    <script>
+      (function () {
+        var CONSENT_KEY = 'pz_analytics_consent_v1';
+        var MEASUREMENT_ID = 'G-KGLTSPFH64';
+
+        function configureAnalytics() {
+          if (window.__gaConfigured || !window.gtag) return;
+          window.__gaConfigured = true;
+          gtag('js', new Date());
+          gtag('config', MEASUREMENT_ID, { anonymize_ip: true });
+        }
+
+        function loadAnalytics() {
+          window.dataLayer = window.dataLayer || [];
+          window.gtag = window.gtag || function () { window.dataLayer.push(arguments); };
+
+          if (window.__gaLoaded) {
+            configureAnalytics();
+            return;
+          }
+
+          window.__gaLoaded = true;
+
+          var existingScript = document.querySelector('script[data-ga-measurement-id="' + MEASUREMENT_ID + '"]');
+          if (existingScript) {
+            if (window.__gaScriptReady) {
+              configureAnalytics();
+            } else {
+              existingScript.addEventListener('load', function () {
+                window.__gaScriptReady = true;
+                configureAnalytics();
+              }, { once: true });
+            }
+            return;
+          }
+
+          var script = document.createElement('script');
+          script.async = true;
+          script.src = 'https://www.googletagmanager.com/gtag/js?id=' + MEASUREMENT_ID;
+          script.dataset.gaMeasurementId = MEASUREMENT_ID;
+          script.onload = function () {
+            window.__gaScriptReady = true;
+            configureAnalytics();
+          };
+          script.onerror = function () {
+            window.__gaLoaded = false;
+            window.__gaConfigured = false;
+          };
+          document.head.appendChild(script);
+        }
+
+        function saveConsent(value) {
+          try {
+            localStorage.setItem(CONSENT_KEY, value);
+          } catch (error) {
+            // Ignore storage errors and continue without persistence.
+          }
+        }
+
+        function readConsent() {
+          try {
+            return localStorage.getItem(CONSENT_KEY);
+          } catch (error) {
+            return null;
+          }
+        }
+
+        function resetAnalyticsPreferences() {
+          try {
+            localStorage.removeItem(CONSENT_KEY);
+          } catch (error) {
+            // Ignore storage errors and continue.
+          }
+          removeBanner();
+          createBanner();
+        }
+
+        window.resetAnalyticsPreferences = resetAnalyticsPreferences;
+
+        function removeBanner() {
+          var banner = document.getElementById('consent-banner');
+          if (banner) banner.remove();
+          document.body.style.overflow = '';
+        }
+
+        function createBanner() {
+          if (document.getElementById('consent-banner')) return;
+          var overlay = document.createElement('div');
+          overlay.id = 'consent-banner';
+          overlay.style.cssText = [
+            'position:fixed',
+            'inset:0',
+            'z-index:9999',
+            'display:flex',
+            'align-items:center',
+            'justify-content:center',
+            'padding:24px',
+            'background:rgba(15,23,42,0.5)',
+            'backdrop-filter:blur(8px)'
+          ].join(';');
+
+          var banner = document.createElement('div');
+          banner.setAttribute('role', 'dialog');
+          banner.setAttribute('aria-modal', 'true');
+          banner.setAttribute('aria-live', 'polite');
+          banner.setAttribute('aria-labelledby', 'consent-banner-heading');
+          banner.setAttribute('aria-describedby', 'consent-banner-description');
+          banner.style.cssText = [
+            'width:min(100%,620px)',
+            'padding:26px',
+            'border-radius:24px',
+            'border:1px solid rgba(15,23,42,0.18)',
+            'background:#ffffff',
+            'box-shadow:0 30px 80px -28px rgba(2,6,23,0.75)',
+            'display:grid',
+            'gap:18px',
+            'font:500 14px/1.5 Manrope, Arial, sans-serif',
+            'color:#0f172a'
+          ].join(';');
+
+          var heading = document.createElement('div');
+          heading.id = 'consent-banner-heading';
+          heading.style.cssText = 'font:800 18px/1.2 Manrope, Arial, sans-serif;color:#0f172a;';
+          heading.textContent = 'Help improve Waterpolo Hub';
+
+          var text = document.createElement('div');
+          text.id = 'consent-banner-description';
+          text.textContent =
+            'Allow optional Google Analytics 4 so I can understand visits and improve the website. Basic privacy-friendly traffic measurement with Umami runs separately.';
+
+          var details = document.createElement('div');
+          details.style.cssText =
+            'display:grid;gap:8px;font:500 12px/1.55 Manrope, Arial, sans-serif;color:#475569;background:#f8fafc;border:1px solid rgba(148,163,184,0.24);border-radius:16px;padding:12px 14px;';
+
+          [
+            'Google Analytics 4 stays off until you accept.',
+            'Umami is used for basic privacy-friendly visitor counts without cross-site tracking.',
+            'Rejecting does not block the site or any core features.',
+            'You can change this later via Analytics preferences in the app.'
+          ].forEach(function (line) {
+            var row = document.createElement('div');
+            row.textContent = '• ' + line;
+            details.appendChild(row);
+          });
+
+          var actions = document.createElement('div');
+          actions.style.cssText = 'display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;';
+
+          var reject = document.createElement('button');
+          reject.type = 'button';
+          reject.textContent = 'Reject analytics';
+          reject.style.cssText = 'border:1px solid rgba(15,23,42,0.18);background:#fff;color:#0f172a;border-radius:999px;padding:14px 16px;font:700 13px Manrope, Arial,sans-serif;cursor:pointer;';
+          reject.onclick = function () {
+            saveConsent('denied');
+            removeBanner();
+          };
+
+          var accept = document.createElement('button');
+          accept.type = 'button';
+          accept.textContent = 'Accept analytics';
+          accept.style.cssText = 'border:1px solid transparent;background:#0f4ea6;color:#fff;border-radius:999px;padding:14px 16px;font:700 13px Manrope, Arial,sans-serif;cursor:pointer;';
+          accept.onclick = function () {
+            saveConsent('granted');
+            loadAnalytics();
+            removeBanner();
+          };
+
+          var footer = document.createElement('div');
+          footer.style.cssText = 'font:500 12px/1.5 Manrope, Arial, sans-serif;color:#64748b;text-align:center;';
+          footer.textContent = 'This choice applies only to website analytics and can be updated later.';
+
+          actions.appendChild(reject);
+          actions.appendChild(accept);
+          banner.appendChild(heading);
+          banner.appendChild(text);
+          banner.appendChild(details);
+          banner.appendChild(actions);
+          banner.appendChild(footer);
+          overlay.appendChild(banner);
+          document.body.appendChild(overlay);
+          document.body.style.overflow = 'hidden';
+        }
+
+        var consent = readConsent();
+        if (consent === 'granted') {
+          loadAnalytics();
+        }
+
+        window.addEventListener('DOMContentLoaded', function () {
+          if (!readConsent()) createBanner();
+        });
+      })();
+    </script>
+    <script defer src="https://cloud.umami.is/script.js" data-website-id="7da38100-4be9-4a6b-9cea-0f1a5e1e2236"></script>
+  </head>
+  <body>
+    <noscript>
+      <main style="max-width:860px;margin:24px auto;padding:0 16px;font-family:Inter,system-ui,sans-serif;color:#0f172a;">
+        <h1>Waterpolo Hub</h1>
+        <p>Water polo statistics and scoring app with modules for live scoring, shotmap, analytics, stat sheet, and video analysis.</p>
+        <ul>
+          <li><a href="/water-polo-scoring-app.html">Water polo scoring app</a></li>
+          <li><a href="/water-polo-shotmap-app.html">Water polo shotmap app</a></li>
+          <li><a href="/water-polo-statistics-app.html">Water polo analytics app</a></li>
+          <li><a href="/water-polo-stat-sheet-app.html">Water polo stat sheet app</a></li>
+          <li><a href="/docs/waterpolo-quickstart.html">Quickstart guide</a></li>
+        </ul>
+      </main>
+    </noscript>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>

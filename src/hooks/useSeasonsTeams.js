@@ -1,0 +1,85 @@
+import { useEffect, useState } from 'react';
+import { supabase, supabaseEnabled } from '../lib/supabase';
+import { loadSeasons } from '../lib/practice/storage';
+
+export const useSeasonsTeams = (userId) => {
+  const [seasons, setSeasons] = useState([]);
+  const [loadingSeasons, setLoadingSeasons] = useState(true);
+  const isSmokeMode = import.meta.env.VITE_E2E_SMOKE === '1';
+
+  useEffect(() => {
+    if (isSmokeMode) {
+      setSeasons([
+        {
+          id: 'smoke-season-1',
+          name: '2025-2026',
+          teams: [
+            {
+              id: 'smoke-team-1',
+              name: 'dwt H1',
+              season_id: 'smoke-season-1',
+              quarter_length_minutes: 7
+            },
+            {
+              id: 'smoke-team-2',
+              name: 'dwt U18',
+              season_id: 'smoke-season-1',
+              quarter_length_minutes: 7
+            }
+          ]
+        }
+      ]);
+      setLoadingSeasons(false);
+      return;
+    }
+
+    if (!userId) {
+      setSeasons([]);
+      setLoadingSeasons(false);
+      return;
+    }
+
+    const localSeasons = loadSeasons();
+    if (localSeasons.length > 0 || !supabaseEnabled || !supabase) {
+      setSeasons(localSeasons);
+      setLoadingSeasons(false);
+      return;
+    }
+
+    let active = true;
+    setLoadingSeasons(true);
+    const load = async () => {
+      try {
+        const [seasonsRes, teamsRes] = await Promise.all([
+          supabase.from('seasons').select('*').order('created_at', { ascending: true }),
+          supabase.from('teams').select('*').order('created_at', { ascending: true })
+        ]);
+        if (seasonsRes.error || teamsRes.error) {
+          throw new Error(
+            seasonsRes.error?.message || teamsRes.error?.message || 'Failed to load seasons'
+          );
+        }
+        if (!active) return;
+        const seasonsWithTeams = (seasonsRes.data || []).map((season) => ({
+          id: season.id,
+          name: season.name,
+          teams: (teamsRes.data || []).filter((team) => team.season_id === season.id)
+        }));
+        setSeasons(seasonsWithTeams);
+      } catch (error) {
+        if (!active) return;
+        console.error('[useSeasonsTeams] load failed:', error);
+        setSeasons([]);
+      } finally {
+        if (active) setLoadingSeasons(false);
+      }
+    };
+    load();
+
+    return () => {
+      active = false;
+    };
+  }, [userId, isSmokeMode]);
+
+  return { seasons, setSeasons, loadingSeasons };
+};

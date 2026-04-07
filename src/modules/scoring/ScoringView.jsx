@@ -1,0 +1,1814 @@
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { supabase } from '../../lib/supabase';
+import ModuleHeader from '../../components/ModuleHeader';
+import ModuleEmptyState from '../../components/ModuleEmptyState';
+import { normalizeTime, splitTimeParts, timeToSeconds } from '../../utils/time';
+import StatTooltipLabel from '../../components/StatTooltipLabel';
+import ToolbarButton from '../../components/ToolbarButton';
+import { loadTeamLineups, saveMatchLineup } from '../../lib/waterpolo/dataLoaders';
+import {
+  createEmptyPlayerScoringStats,
+  createEmptyScoringTotals,
+  getScoringEventMeta,
+  normalizeScoringEventType,
+  SCORING_EVENTS
+} from '../../lib/waterpolo/scoring';
+
+const SCORING_TOOLTIPS = {
+  shotGoals: 'Goals recorded as shot outcomes in the scoring workflow.',
+  shots: 'Shot goal + shot saved + shot missed events.',
+  personalFouls: 'Personal fouls from exclusion fouls and penalty fouls.',
+  exclusions: 'Exclusion fouls committed by your team.',
+  penaltyFouls: 'Penalty fouls committed by your team.',
+  ordinaryFouls: 'Ordinary fouls recorded for your team.',
+  misconducts: 'Misconduct exclusions from the remainder of the game.',
+  violentActions: 'Violent action exclusions with substitution only after four minutes.',
+  turnoversWon: 'Possessions regained by your team.',
+  turnoversLost: 'Possessions lost by your team.',
+  timeouts: 'Timeout events logged.',
+  shotConversion: 'Shot goals divided by total recorded shots.'
+};
+
+const ScoringView = ({
+  seasonId,
+  teamId,
+  userId,
+  confirmAction,
+  toast,
+  loadData,
+  onDataUpdated,
+  periods,
+  periodOrder,
+  quarterLengthMinutes = 7,
+  showTooltips = true,
+  showInAppHints = true,
+  onOpenModule,
+  isAppMode = false
+}) => {
+  const resolvedQuarterLength = [5, 6, 7, 8].includes(Number(quarterLengthMinutes))
+    ? Number(quarterLengthMinutes)
+    : 7;
+  const defaultClock = `${resolvedQuarterLength}:00`;
+  const [allRoster, setAllRoster] = useState([]);
+  const [matches, setMatches] = useState([]);
+  const [events, setEvents] = useState([]);
+  const [lineups, setLineups] = useState([]);
+  const [lineupSupported, setLineupSupported] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [currentMatchId, setCurrentMatchId] = useState('');
+  const [statsMatchId, setStatsMatchId] = useState('');
+  const [creatingMatch, setCreatingMatch] = useState({
+    name: '',
+    opponentName: ''
+  });
+  const [savingMatch, setSavingMatch] = useState(false);
+  const [editingLineup, setEditingLineup] = useState(false);
+  const [lineupSelection, setLineupSelection] = useState({});
+  const [savingLineup, setSavingLineup] = useState(false);
+  const [isFullscreenActive, setIsFullscreenActive] = useState(false);
+  const [isLandscape, setIsLandscape] = useState(
+    typeof window !== 'undefined' ? window.innerWidth > window.innerHeight : false
+  );
+  const [editingEventId, setEditingEventId] = useState(null);
+  const [form, setForm] = useState({
+    type: 'goal',
+    playerCap: '',
+    period: '1',
+    time: defaultClock
+  });
+  const [videoUrl, setVideoUrl] = useState('');
+  const [videoName, setVideoName] = useState('');
+  const [liveMode, setLiveMode] = useState(false);
+  const [focusMode, setFocusMode] = useState(false);
+  const [quickMode, setQuickMode] = useState(true);
+  const [showMobileLog, setShowMobileLog] = useState(false);
+  const [showMobileAdvanced, setShowMobileAdvanced] = useState(false);
+  const [liveGuard, setLiveGuard] = useState(true);
+  const [lastSavedAt, setLastSavedAt] = useState('');
+  const [lastEventMeta, setLastEventMeta] = useState(() => ({
+    period: '1',
+    time: defaultClock
+  }));
+  const videoInputRef = useRef(null);
+  const videoElementRef = useRef(null);
+  const secondsHoldTimeoutRef = useRef(null);
+  const secondsHoldIntervalRef = useRef(null);
+  const wakeLockRef = useRef(null);
+  const liveModeContainerRef = useRef(null);
+  const draftLoadedRef = useRef(false);
+
+  useEffect(() => {
+    if (!teamId) return;
+    let active = true;
+    const load = async () => {
+      try {
+        const payload = await loadData(teamId);
+        if (!active) return;
+        const mappedRoster = payload.roster.map((player) => ({
+          id: player.id,
+          teamPlayerId: player.team_player_id || player.id,
+          playerId: player.player_id || player.id,
+          name: player.name,
+          capNumber: player.cap_number
+        }));
+        setAllRoster(mappedRoster);
+        setMatches(payload.matches || []);
+        setEvents(
+          (payload.events || []).map((evt) => ({
+            id: evt.id,
+            matchId: evt.match_id,
+            type: normalizeScoringEventType(evt.event_type),
+            playerCap: evt.player_cap || '',
+            period: evt.period,
+            time: evt.time,
+            createdAt: evt.created_at
+          }))
+        );
+        const sortedPayloadMatches = [...(payload.matches || [])].sort((a, b) => {
+          const ad = a.date ? new Date(a.date).getTime() : 0;
+          const bd = b.date ? new Date(b.date).getTime() : 0;
+          return bd - ad;
+        });
+        setCurrentMatchId(sortedPayloadMatches[0]?.id || '');
+        setStatsMatchId('');
+        setLineups(payload.lineups || []);
+        setLineupSupported(Boolean(payload.lineupsSupported));
+        setError('');
+      } catch (e) {
+        if (active) setError('Could not load scoring data.');
+      } finally {
+        if (active) setLoading(false);
+      }
+    };
+    load();
+    return () => {
+      active = false;
+    };
+  }, [teamId]);
+
+  const sortedMatches = useMemo(() => {
+    const readDate = (match) => {
+      const raw = match.date || '';
+      const stamp = raw ? new Date(raw).getTime() : 0;
+      return Number.isNaN(stamp) ? 0 : stamp;
+    };
+    return [...matches].sort((a, b) => readDate(b) - readDate(a));
+  }, [matches]);
+
+  const draftStorageKey = useMemo(
+    () => (teamId ? `waterpolo_scoring_draft_${teamId}` : ''),
+    [teamId]
+  );
+
+  const currentMatch = matches.find((match) => match.id === currentMatchId);
+
+  const activeRoster = useMemo(() => {
+    if (!currentMatchId) return allRoster;
+    const rows = (lineups || []).filter(
+      (row) => row.match_id === currentMatchId && (row.status || 'playing') === 'playing'
+    );
+    if (!rows.length) return allRoster;
+
+    const byTeamPlayerId = new Map(allRoster.map((player) => [player.teamPlayerId || player.id, player]));
+    const byPlayerId = new Map(allRoster.map((player) => [player.playerId || player.id, player]));
+    const next = [];
+    rows.forEach((row) => {
+      const linked =
+        byTeamPlayerId.get(row.team_player_id) ||
+        byPlayerId.get(row.player_id) ||
+        allRoster.find((player) => player.capNumber === row.cap_number);
+      if (!linked) return;
+      next.push({
+        ...linked,
+        capNumber: row.cap_number || linked.capNumber
+      });
+    });
+    const unique = new Map();
+    next.forEach((player) => {
+      const key = `${player.capNumber}__${player.playerId || player.teamPlayerId || player.id}`;
+      if (!unique.has(key)) unique.set(key, player);
+    });
+    return Array.from(unique.values());
+  }, [allRoster, currentMatchId, lineups]);
+
+  const isUsingMatchLineup = useMemo(() => {
+    if (!currentMatchId) return false;
+    return (lineups || []).some(
+      (row) => row.match_id === currentMatchId && (row.status || 'playing') === 'playing'
+    );
+  }, [currentMatchId, lineups]);
+
+  const filteredEvents = useMemo(() => {
+    if (!statsMatchId) return events;
+    return events.filter((evt) => evt.matchId === statsMatchId);
+  }, [events, statsMatchId]);
+
+  const sortedEvents = useMemo(() => {
+    const matchFiltered = currentMatchId
+      ? filteredEvents.filter((evt) => evt.matchId === currentMatchId)
+      : filteredEvents;
+    return [...matchFiltered].sort((a, b) => {
+      const periodDiff = (periodOrder[b.period] || 0) - (periodOrder[a.period] || 0);
+      if (periodDiff !== 0) return periodDiff;
+      return timeToSeconds(b.time) - timeToSeconds(a.time);
+    });
+  }, [filteredEvents, currentMatchId]);
+
+  const matchEventsSorted = useMemo(() => {
+    if (!currentMatchId) return [];
+    return [...events]
+      .filter((evt) => evt.matchId === currentMatchId)
+      .sort((a, b) => {
+        const periodDiff = (periodOrder[b.period] || 0) - (periodOrder[a.period] || 0);
+        if (periodDiff !== 0) return periodDiff;
+        return timeToSeconds(b.time) - timeToSeconds(a.time);
+      });
+  }, [events, currentMatchId]);
+
+  const stats = useMemo(() => {
+    const totals = createEmptyScoringTotals();
+    const playerStats = {};
+    filteredEvents.forEach((evt) => {
+      const normalizedType = normalizeScoringEventType(evt.type);
+      if (normalizedType in totals) totals[normalizedType] += 1;
+      if (evt.playerCap) {
+        if (!playerStats[evt.playerCap]) {
+          playerStats[evt.playerCap] = createEmptyPlayerScoringStats();
+        }
+        const playerItem = playerStats[evt.playerCap];
+        if (normalizedType === 'shot_goal') playerItem.shotGoals += 1;
+        if (normalizedType === 'shot_saved') playerItem.shotSaved += 1;
+        if (normalizedType === 'shot_missed') playerItem.shotMissed += 1;
+        if (normalizedType === 'shot_goal' || normalizedType === 'shot_saved' || normalizedType === 'shot_missed') {
+          playerItem.shots += 1;
+        }
+        if (normalizedType === 'exclusion_foul') playerItem.exclusionFouls += 1;
+        if (normalizedType === 'penalty_foul') playerItem.penaltyFouls += 1;
+        if (normalizedType === 'ordinary_foul') playerItem.ordinaryFouls += 1;
+        if (normalizedType === 'misconduct') playerItem.misconducts += 1;
+        if (normalizedType === 'violent_action') playerItem.violentActions += 1;
+        if (normalizedType === 'turnover_won') playerItem.turnoversWon += 1;
+        if (normalizedType === 'turnover_lost') playerItem.turnoversLost += 1;
+        playerItem.personalFouls = playerItem.exclusionFouls + playerItem.penaltyFouls;
+      }
+    });
+    const shots = totals.shot_goal + totals.shot_saved + totals.shot_missed;
+    const shotConversion = shots ? ((totals.shot_goal / shots) * 100).toFixed(1) : '—';
+    const personalFouls = totals.exclusion_foul + totals.penalty_foul;
+    return { totals, playerStats, shotConversion, personalFouls, shots };
+  }, [filteredEvents]);
+
+  const resetForm = (keepTime = true) => {
+    setForm((prev) => ({
+      ...prev,
+      period: keepTime ? prev.period : lastEventMeta.period,
+      time: keepTime ? prev.time : lastEventMeta.time,
+      playerCap: prev.playerCap || activeRoster[0]?.capNumber || ''
+    }));
+    setEditingEventId(null);
+  };
+
+  useEffect(() => {
+    resetForm(true);
+  }, [activeRoster]);
+
+  useEffect(() => {
+    if (!activeRoster.length) {
+      setForm((prev) => ({ ...prev, playerCap: '' }));
+      return;
+    }
+    setForm((prev) => {
+      if (prev.playerCap && activeRoster.some((player) => player.capNumber === prev.playerCap)) {
+        return prev;
+      }
+      return { ...prev, playerCap: activeRoster[0]?.capNumber || '' };
+    });
+  }, [activeRoster]);
+
+  useEffect(() => {
+    if (!draftStorageKey || draftLoadedRef.current) return;
+    draftLoadedRef.current = true;
+    try {
+      const raw = localStorage.getItem(draftStorageKey);
+      if (!raw) return;
+      const parsed = JSON.parse(raw);
+      const parsedPeriod = String(parsed?.period || '1');
+      const parsedTime = normalizeTime(parsed?.time || defaultClock);
+      const parsedPlayer = String(parsed?.playerCap || '');
+      setForm((prev) => ({
+        ...prev,
+        period: periods.includes(parsedPeriod) ? parsedPeriod : prev.period,
+        time: parsedTime,
+        playerCap: parsedPlayer || prev.playerCap
+      }));
+      setLastEventMeta({
+        period: periods.includes(parsedPeriod) ? parsedPeriod : '1',
+        time: parsedTime
+      });
+    } catch {
+      // Ignore draft parse errors.
+    }
+  }, [defaultClock, draftStorageKey, periods]);
+
+  useEffect(() => {
+    if (!draftStorageKey) return;
+    try {
+      localStorage.setItem(
+        draftStorageKey,
+        JSON.stringify({
+          period: form.period,
+          time: normalizeTime(form.time),
+          playerCap: form.playerCap || ''
+        })
+      );
+    } catch {
+      // Ignore localStorage write failures.
+    }
+  }, [draftStorageKey, form.period, form.playerCap, form.time]);
+
+  useEffect(() => {
+    return () => {
+      if (videoUrl) URL.revokeObjectURL(videoUrl);
+    };
+  }, [videoUrl]);
+
+  const openVideoPicker = () => {
+    videoInputRef.current?.click();
+  };
+
+  const handleVideoFileChange = (event) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    if (videoUrl) URL.revokeObjectURL(videoUrl);
+    const nextUrl = URL.createObjectURL(file);
+    setVideoUrl(nextUrl);
+    setVideoName(file.name);
+    setError('');
+    event.target.value = '';
+  };
+
+  const clearVideo = () => {
+    if (videoUrl) URL.revokeObjectURL(videoUrl);
+    setVideoUrl('');
+    setVideoName('');
+    if (videoInputRef.current) videoInputRef.current.value = '';
+  };
+
+  useEffect(() => {
+    const onKeyDown = (event) => {
+      if (event.code !== 'Space') return;
+      const target = event.target;
+      const tagName = target?.tagName;
+      if (tagName === 'INPUT' || tagName === 'TEXTAREA' || tagName === 'SELECT' || tagName === 'BUTTON') {
+        return;
+      }
+      if (target?.isContentEditable) return;
+      const video = videoElementRef.current;
+      if (!video) return;
+      event.preventDefault();
+      if (video.paused) {
+        video.play().catch(() => {});
+      } else {
+        video.pause();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+    };
+  }, [videoUrl]);
+
+  useEffect(() => {
+    const requestWakeLock = async () => {
+      if (!liveMode || !('wakeLock' in navigator)) return;
+      try {
+        // keep device awake during live scoring
+        wakeLockRef.current = await navigator.wakeLock.request('screen');
+      } catch {
+        wakeLockRef.current = null;
+      }
+    };
+    requestWakeLock();
+    return () => {
+      wakeLockRef.current?.release?.();
+      wakeLockRef.current = null;
+    };
+  }, [liveMode]);
+
+  useEffect(() => {
+    if (!focusMode) return;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => {
+      document.body.style.overflow = previousOverflow;
+    };
+  }, [focusMode]);
+
+  useEffect(() => {
+    if (!focusMode) return;
+    const onKeyDown = (event) => {
+      if (event.key === 'Escape') setFocusMode(false);
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+    };
+  }, [focusMode]);
+
+  useEffect(() => {
+    const onResize = () => {
+      setIsLandscape(window.innerWidth > window.innerHeight);
+    };
+    const onFullscreenChange = () => {
+      const active =
+        Boolean(document.fullscreenElement) || Boolean(document.webkitFullscreenElement);
+      setIsFullscreenActive(active);
+    };
+    window.addEventListener('resize', onResize);
+    window.addEventListener('orientationchange', onResize);
+    document.addEventListener('fullscreenchange', onFullscreenChange);
+    document.addEventListener('webkitfullscreenchange', onFullscreenChange);
+    onResize();
+    onFullscreenChange();
+    return () => {
+      window.removeEventListener('resize', onResize);
+      window.removeEventListener('orientationchange', onResize);
+      document.removeEventListener('fullscreenchange', onFullscreenChange);
+      document.removeEventListener('webkitfullscreenchange', onFullscreenChange);
+    };
+  }, []);
+
+  const getFullscreenElement = () =>
+    document.fullscreenElement || document.webkitFullscreenElement || null;
+
+  const exitFullscreen = async () => {
+    if (document.exitFullscreen) {
+      await document.exitFullscreen();
+      return true;
+    }
+    if (document.webkitExitFullscreen) {
+      document.webkitExitFullscreen();
+      return true;
+    }
+    return false;
+  };
+
+  const requestFullscreenOn = async (element) => {
+    if (!element) return false;
+    if (element.requestFullscreen) {
+      await element.requestFullscreen();
+      return true;
+    }
+    if (element.webkitRequestFullscreen) {
+      element.webkitRequestFullscreen();
+      return true;
+    }
+    return false;
+  };
+
+  const toggleFullscreen = async () => {
+    try {
+      if (getFullscreenElement()) {
+        await exitFullscreen();
+        return;
+      }
+
+      const requested =
+        (await requestFullscreenOn(liveModeContainerRef.current)) ||
+        (await requestFullscreenOn(document.documentElement));
+      if (requested) return;
+
+      // iOS Safari fallback: only available on HTMLVideoElement.
+      if (videoElementRef.current?.webkitEnterFullscreen) {
+        videoElementRef.current.webkitEnterFullscreen();
+        return;
+      }
+
+      toast('Fullscreen is not supported on this mobile browser.', 'error');
+    } catch {
+      toast('Could not enter fullscreen on this device.', 'error');
+    }
+  };
+
+  const confirmWithinCurrentView = async (message) => {
+    if (focusMode || getFullscreenElement()) return window.confirm(message);
+    if (typeof confirmAction === 'function') return confirmAction(message);
+    return window.confirm(message);
+  };
+
+  const toClampedTime = (nextTotal) => {
+    const clamped = Math.max(0, Math.min(resolvedQuarterLength * 60, nextTotal));
+    const minutes = Math.floor(clamped / 60);
+    const seconds = clamped % 60;
+    return `${minutes}:${String(seconds).padStart(2, '0')}`;
+  };
+
+  const timePresets = useMemo(
+    () => Array.from({ length: resolvedQuarterLength }, (_, index) => `${resolvedQuarterLength - index}:00`),
+    [resolvedQuarterLength]
+  );
+
+  const adjustMinutes = (delta) => {
+    setForm((prev) => {
+      const parts = splitTimeParts(prev.time);
+      return { ...prev, time: toClampedTime(parts.minutes * 60 + parts.seconds + delta * 60) };
+    });
+  };
+
+  const adjustSeconds = (delta) => {
+    setForm((prev) => {
+      const parts = splitTimeParts(prev.time);
+      return { ...prev, time: toClampedTime(parts.minutes * 60 + parts.seconds + delta) };
+    });
+  };
+
+  const clearSecondsHold = () => {
+    if (secondsHoldTimeoutRef.current) {
+      window.clearTimeout(secondsHoldTimeoutRef.current);
+      secondsHoldTimeoutRef.current = null;
+    }
+    if (secondsHoldIntervalRef.current) {
+      window.clearInterval(secondsHoldIntervalRef.current);
+      secondsHoldIntervalRef.current = null;
+    }
+  };
+
+  const startSecondsHold = (delta, event) => {
+    if (event.button !== undefined && event.button !== 0) return;
+    event.preventDefault();
+    clearSecondsHold();
+    adjustSeconds(delta);
+    secondsHoldTimeoutRef.current = window.setTimeout(() => {
+      secondsHoldIntervalRef.current = window.setInterval(() => {
+        adjustSeconds(delta);
+      }, 80);
+    }, 260);
+  };
+
+  useEffect(() => {
+    return () => {
+      clearSecondsHold();
+    };
+  }, []);
+
+  useEffect(() => {
+    setForm((prev) => {
+      const parts = splitTimeParts(prev.time);
+      return { ...prev, time: toClampedTime(parts.minutes * 60 + parts.seconds) };
+    });
+    setLastEventMeta((prev) => {
+      const parts = splitTimeParts(prev.time);
+      return { ...prev, time: toClampedTime(parts.minutes * 60 + parts.seconds) };
+    });
+  }, [resolvedQuarterLength]);
+
+  useEffect(() => {
+    if (!liveMode) setLiveGuard(true);
+  }, [liveMode]);
+
+  useEffect(() => {
+    if (quickMode) return;
+    setShowMobileLog(true);
+  }, [quickMode]);
+
+  const saveEvent = async (eventType = form.type) => {
+    if (!currentMatch) {
+      setError('Create or select a match first.');
+      return;
+    }
+    const requiresPlayer = SCORING_EVENTS.find((item) => item.key === eventType)?.player;
+    if (requiresPlayer && !form.playerCap) {
+      setError('Select a player.');
+      return;
+    }
+    const payload = {
+      user_id: userId,
+      season_id: seasonId,
+      team_id: teamId,
+      match_id: currentMatch.id,
+      event_type: normalizeScoringEventType(eventType),
+      player_cap: requiresPlayer ? form.playerCap : null,
+      period: form.period,
+      time: normalizeTime(form.time)
+    };
+    let data;
+    if (editingEventId) {
+      const { data: updated, error: updateError } = await supabase
+        .from('scoring_events')
+        .update(payload)
+        .eq('id', editingEventId)
+        .select('*')
+        .single();
+      if (updateError) {
+        setError('Failed to update event.');
+        return;
+      }
+      data = updated;
+    } else {
+      const { data: inserted, error: insertError } = await supabase
+        .from('scoring_events')
+        .insert(payload)
+        .select('*')
+        .single();
+      if (insertError) {
+        setError('Failed to save event.');
+        return;
+      }
+      data = inserted;
+    }
+    const nextEvent = {
+      id: data.id,
+      matchId: data.match_id,
+      type: normalizeScoringEventType(data.event_type),
+      playerCap: data.player_cap || '',
+      period: data.period,
+      time: data.time,
+      createdAt: data.created_at
+    };
+    setEvents((prev) => {
+      if (editingEventId) {
+        return prev.map((evt) => (evt.id === editingEventId ? nextEvent : evt));
+      }
+      return [...prev, nextEvent];
+    });
+    setLastEventMeta({ period: form.period, time: normalizeTime(form.time) });
+    setLastSavedAt(new Date().toISOString());
+    setError('');
+    setEditingEventId(null);
+    onDataUpdated?.();
+  };
+
+  const deleteEvent = async (eventInput, { skipConfirm = false } = {}) => {
+    const eventId = typeof eventInput === 'string' ? eventInput : eventInput?.id;
+    if (!eventId) return;
+    if (!skipConfirm) {
+      const eventRow =
+        typeof eventInput === 'string'
+          ? events.find((evt) => evt.id === eventInput)
+          : eventInput;
+      const typeLabel = eventRow ? getScoringEventMeta(eventRow.type).label : 'event';
+      const playerLabel = eventRow?.playerCap ? `#${eventRow.playerCap}` : 'Team';
+      const detail = eventRow ? ` (${playerLabel}, P${eventRow.period} ${eventRow.time})` : '';
+      if (!(await confirmWithinCurrentView(`Delete ${typeLabel}${detail}?`))) return;
+    }
+    const { error: deleteError } = await supabase.from('scoring_events').delete().eq('id', eventId);
+    if (deleteError) {
+      setError('Failed to delete event.');
+      toast('Failed to delete event.', 'error');
+      return;
+    }
+    setEvents((prev) => prev.filter((evt) => evt.id !== eventId));
+    setLastSavedAt(new Date().toISOString());
+    onDataUpdated?.();
+    toast('Event deleted.', 'success');
+  };
+
+  const undoLastEvent = async () => {
+    if (!currentMatchId) return;
+    const matchEvents = events.filter((evt) => evt.matchId === currentMatchId);
+    if (matchEvents.length === 0) return;
+    const last = [...matchEvents].sort((a, b) => {
+      const timeA = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+      const timeB = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+      return timeB - timeA;
+    })[0];
+    if (!last) return;
+    if (!(await confirmWithinCurrentView('Undo last event?'))) return;
+    await deleteEvent(last, { skipConfirm: true });
+  };
+
+  const getLineupSelectionKey = (player) => player.teamPlayerId || player.playerId || player.id;
+
+  const refreshLineups = async () => {
+    const refreshed = await loadTeamLineups(teamId);
+    setLineups(refreshed.lineups || []);
+    setLineupSupported(Boolean(refreshed.supported));
+  };
+
+  const openLineupEditor = () => {
+    if (!currentMatchId) {
+      setError('Select a match first.');
+      return;
+    }
+    if (!lineupSupported) {
+      setError('Match lineup requires the latest database update.');
+      return;
+    }
+    const rows = (lineups || []).filter(
+      (row) => row.match_id === currentMatchId && (row.status || 'playing') === 'playing'
+    );
+    const nextSelection = {};
+    if (rows.length) {
+      rows.forEach((row) => {
+        const key = row.team_player_id || row.player_id;
+        if (key) nextSelection[key] = true;
+      });
+    } else {
+      allRoster.forEach((player) => {
+        nextSelection[getLineupSelectionKey(player)] = true;
+      });
+    }
+    setLineupSelection(nextSelection);
+    setEditingLineup(true);
+    setError('');
+  };
+
+  const saveLineup = async () => {
+    if (!currentMatchId) return;
+    const selectedRows = allRoster.filter((player) => lineupSelection[getLineupSelectionKey(player)]);
+    if (!selectedRows.length) {
+      setError('Select at least one playing player.');
+      return;
+    }
+    try {
+      setSavingLineup(true);
+      await saveMatchLineup({
+        matchId: currentMatchId,
+        seasonId,
+        teamId,
+        userId,
+        lineupRows: selectedRows.map((player) => ({
+          id: player.teamPlayerId || player.id,
+          player_id: player.playerId || player.id,
+          cap_number: player.capNumber,
+          status: 'playing'
+        }))
+      });
+      await refreshLineups();
+      setEditingLineup(false);
+      toast('Lineup saved.', 'success');
+      onDataUpdated?.();
+    } catch (e) {
+      setError(e.message || 'Failed to save lineup.');
+    } finally {
+      setSavingLineup(false);
+    }
+  };
+
+  const createMatch = async () => {
+    if (!creatingMatch.name.trim()) {
+      setError('Match name is required.');
+      return;
+    }
+    try {
+      setSavingMatch(true);
+      const { data, error: insertError } = await supabase
+        .from('matches')
+        .insert({
+          name: creatingMatch.name.trim(),
+          date: new Date().toISOString().slice(0, 10),
+          opponent_name: creatingMatch.opponentName.trim(),
+          season_id: seasonId,
+          team_id: teamId,
+          user_id: userId
+        })
+        .select('*')
+        .single();
+      if (insertError) throw insertError;
+
+      setMatches((prev) => [data, ...prev]);
+      setCurrentMatchId(data.id);
+      setStatsMatchId('');
+      setCreatingMatch({ name: '', opponentName: '' });
+
+      if (lineupSupported && allRoster.length) {
+        await saveMatchLineup({
+          matchId: data.id,
+          seasonId,
+          teamId,
+          userId,
+          lineupRows: allRoster.map((player) => ({
+            id: player.teamPlayerId || player.id,
+            player_id: player.playerId || player.id,
+            cap_number: player.capNumber,
+            status: 'playing'
+          }))
+        });
+        await refreshLineups();
+      }
+
+      setError('');
+      toast('Match created.', 'success');
+      onDataUpdated?.();
+    } catch (e) {
+      setError(e.message || 'Failed to create match.');
+      toast('Failed to create match.', 'error');
+    } finally {
+      setSavingMatch(false);
+    }
+  };
+
+  if (loading) {
+    return <div className="p-10 text-slate-700">Loading...</div>;
+  }
+
+  const containerClasses = [
+    'space-y-4 md:space-y-6',
+    focusMode ? 'fixed inset-0 z-[90] overflow-y-auto bg-slate-100 p-3' : '',
+    liveMode && !focusMode ? 'rounded-2xl border border-cyan-200 bg-cyan-50/40 p-3' : ''
+  ]
+    .filter(Boolean)
+    .join(' ');
+
+  const containerStyle = focusMode
+    ? {
+        paddingTop: 'max(0.75rem, env(safe-area-inset-top))',
+        paddingBottom: 'max(0.75rem, env(safe-area-inset-bottom))'
+      }
+    : undefined;
+
+  const compactAppFullscreen = isAppMode && (focusMode || isFullscreenActive || (liveMode && isLandscape));
+  const showDesktopLayout = !isAppMode;
+  const mobileLayoutClass = isAppMode ? 'rounded-2xl bg-white p-3 shadow-sm' : 'rounded-2xl bg-white p-3 shadow-sm md:hidden';
+  const savedLabel = lastSavedAt ? `Saved ${new Date(lastSavedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : 'Not saved yet';
+
+  return (
+    <div ref={liveModeContainerRef} className={containerClasses} style={containerStyle}>
+      <input
+        ref={videoInputRef}
+        type="file"
+        accept="video/*"
+        className="hidden"
+        onChange={handleVideoFileChange}
+      />
+
+      {focusMode && (
+        <div className="sticky top-0 z-20 -mx-1 mb-1 flex items-center justify-between rounded-xl border border-slate-200 bg-white/95 px-3 py-2 shadow-sm backdrop-blur">
+          <div className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">Focus scoring mode</div>
+          <button
+            className="rounded-md bg-slate-900 px-2.5 py-1.5 text-xs font-semibold text-white"
+            onClick={() => setFocusMode(false)}
+          >
+            Exit focus
+          </button>
+        </div>
+      )}
+
+      <div className={showDesktopLayout ? 'hidden md:block' : 'hidden'}>
+        <ModuleHeader
+          eyebrow="Scoring & Stats"
+          title="Match Events"
+          description="Record live match events for the selected team with an optional local video reference."
+          actions={
+            <>
+              <ToolbarButton className="text-xs" onClick={() => setLiveMode((prev) => !prev)}>
+                {liveMode ? 'Exit live mode' : 'Live mode'}
+              </ToolbarButton>
+              <ToolbarButton className="text-xs" onClick={toggleFullscreen}>
+                Fullscreen
+              </ToolbarButton>
+              <ToolbarButton className="text-xs" onClick={() => setFocusMode((prev) => !prev)}>
+                {focusMode ? 'Exit focus mode' : 'Focus mode'}
+              </ToolbarButton>
+              <ToolbarButton variant="primary" className="text-xs" onClick={openVideoPicker}>
+                {videoUrl ? 'Change video' : 'Select video (optional)'}
+              </ToolbarButton>
+              {videoUrl && (
+                <ToolbarButton className="text-xs text-slate-600" onClick={clearVideo}>
+                  Remove video
+                </ToolbarButton>
+              )}
+            </>
+          }
+        />
+      </div>
+
+      <div className={mobileLayoutClass}>
+        <div className="flex items-center justify-between gap-2">
+          <div>
+            <div className="text-xs font-semibold uppercase tracking-[0.14em] text-slate-500">Live scoring</div>
+            <div className="text-sm font-semibold text-slate-900">Match events</div>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              className={`rounded-lg border px-2.5 py-1.5 text-xs font-semibold ${
+                liveMode ? 'border-cyan-600 bg-cyan-600 text-white' : 'border-slate-200 text-slate-700'
+              }`}
+              onClick={() => setLiveMode((prev) => !prev)}
+            >
+              Live
+            </button>
+            <button
+              className="rounded-lg border border-slate-200 px-2.5 py-1.5 text-xs font-semibold text-slate-700"
+              onClick={toggleFullscreen}
+            >
+              Full
+            </button>
+            <button
+              className={`rounded-lg border px-2.5 py-1.5 text-xs font-semibold ${
+                focusMode ? 'border-slate-900 bg-slate-900 text-white' : 'border-slate-200 text-slate-700'
+              }`}
+              onClick={() => setFocusMode((prev) => !prev)}
+            >
+              Focus
+            </button>
+            <button
+              className={`rounded-lg border px-2.5 py-1.5 text-xs font-semibold ${
+                quickMode ? 'border-slate-900 bg-slate-900 text-white' : 'border-slate-200 text-slate-700'
+              }`}
+              onClick={() => setQuickMode((prev) => !prev)}
+            >
+              Quick
+            </button>
+            {!compactAppFullscreen && (
+              <button
+                className="rounded-lg border border-slate-200 px-2.5 py-1.5 text-xs font-semibold text-slate-700"
+                onClick={openVideoPicker}
+              >
+                {videoUrl ? 'Video' : 'Select video'}
+              </button>
+            )}
+            {!compactAppFullscreen && videoUrl && (
+              <button
+                className="rounded-lg border border-slate-200 px-2.5 py-1.5 text-xs font-semibold text-slate-600"
+                onClick={clearVideo}
+              >
+                Remove
+              </button>
+            )}
+          </div>
+        </div>
+        <div className="mt-2 flex items-center justify-between text-[11px] font-semibold text-slate-500">
+          <span>{savedLabel}</span>
+          {showInAppHints && <span>Set time + player, then tap one action.</span>}
+        </div>
+
+        <div className="mt-3 grid grid-cols-[1fr_auto_auto] gap-2">
+          <select
+            aria-label="Live selected match"
+            className="rounded-lg border border-slate-200 px-2.5 py-2 text-sm"
+            value={currentMatchId}
+            onChange={(event) => setCurrentMatchId(event.target.value)}
+          >
+            {matches.length === 0 && <option value="">No matches</option>}
+            {sortedMatches.map((match) => (
+              <option key={match.id} value={match.id}>
+                {match.name}
+                {match.opponent_name ? ` vs ${match.opponent_name}` : ''} · {match.date}
+              </option>
+            ))}
+          </select>
+          <button
+            className="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700"
+            onClick={undoLastEvent}
+            disabled={!currentMatchId}
+          >
+            Undo
+          </button>
+          <button
+            className="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700 disabled:opacity-50"
+            onClick={openLineupEditor}
+            disabled={!currentMatchId || !lineupSupported}
+          >
+            Lineup
+          </button>
+        </div>
+
+        <div className="mt-2 text-[11px] font-semibold text-slate-500">
+          {isUsingMatchLineup
+            ? `Using match lineup (${activeRoster.length} selected).`
+            : 'No lineup selected for this match. Using full team roster.'}
+        </div>
+
+        {!compactAppFullscreen && (
+          !quickMode && (
+          <div className="mt-2 grid grid-cols-[1fr_1fr_auto] gap-2">
+            <input
+              className="rounded-lg border border-slate-200 px-2.5 py-2 text-sm"
+              placeholder="Match name"
+              value={creatingMatch.name}
+              onChange={(event) => setCreatingMatch((prev) => ({ ...prev, name: event.target.value }))}
+            />
+            <input
+              className="rounded-lg border border-slate-200 px-2.5 py-2 text-sm"
+              placeholder="Opponent (optional)"
+              value={creatingMatch.opponentName}
+              onChange={(event) => setCreatingMatch((prev) => ({ ...prev, opponentName: event.target.value }))}
+            />
+            <button
+              className="rounded-lg bg-slate-900 px-3 py-2 text-xs font-semibold text-white disabled:opacity-50"
+              onClick={createMatch}
+              disabled={!creatingMatch.name.trim() || savingMatch}
+            >
+              Create
+            </button>
+          </div>
+          )
+        )}
+
+        {matches.length === 0 && (
+          <div className="mt-3">
+            <ModuleEmptyState
+              compact
+              title="No matches found"
+              description="Create the first match above. Scoring is tied to one selected match."
+              actions={[]}
+            />
+          </div>
+        )}
+
+        <div className="mt-3 grid grid-cols-[94px_1fr] gap-2">
+          <select
+            aria-label="Live period"
+            className="rounded-lg border border-slate-200 px-2 py-2 text-sm font-semibold text-slate-700"
+            value={form.period}
+            onChange={(event) => setForm((prev) => ({ ...prev, period: event.target.value }))}
+          >
+            {periods.map((period) => (
+              <option key={period} value={period}>
+                P{period}
+              </option>
+            ))}
+          </select>
+          <div className="grid grid-cols-[1fr_auto] gap-2 rounded-lg border border-slate-200 p-2">
+            <div className="flex items-center justify-center rounded-md bg-slate-50 py-2 text-lg font-bold text-slate-900">
+              {normalizeTime(form.time)}
+            </div>
+            <div className="grid grid-cols-2 gap-1">
+              <button
+                className="rounded-md border border-slate-200 px-2 py-1.5 text-xs font-semibold text-slate-700"
+                onClick={() => adjustMinutes(1)}
+              >
+                +1m
+              </button>
+              <button
+                className="rounded-md border border-slate-200 px-2 py-1.5 text-xs font-semibold text-slate-700"
+                onClick={() => adjustMinutes(-1)}
+              >
+                -1m
+              </button>
+              <button
+                className="rounded-md border border-slate-200 px-2 py-1.5 text-xs font-semibold text-slate-700"
+                onPointerDown={(event) => startSecondsHold(1, event)}
+                onPointerUp={clearSecondsHold}
+                onPointerLeave={clearSecondsHold}
+                onPointerCancel={clearSecondsHold}
+              >
+                +1s
+              </button>
+              <button
+                className="rounded-md border border-slate-200 px-2 py-1.5 text-xs font-semibold text-slate-700"
+                onPointerDown={(event) => startSecondsHold(-1, event)}
+                onPointerUp={clearSecondsHold}
+                onPointerLeave={clearSecondsHold}
+                onPointerCancel={clearSecondsHold}
+              >
+                -1s
+              </button>
+              <button
+                className="rounded-md border border-slate-200 px-2 py-1.5 text-xs font-semibold text-slate-700"
+                onClick={() => adjustSeconds(10)}
+              >
+                +10s
+              </button>
+              <button
+                className="rounded-md border border-slate-200 px-2 py-1.5 text-xs font-semibold text-slate-700"
+                onClick={() => adjustSeconds(-10)}
+              >
+                -10s
+              </button>
+            </div>
+          </div>
+        </div>
+
+        {!quickMode && (
+          <div className="mt-3 flex flex-wrap gap-1.5">
+            {timePresets.map((preset) => (
+              <button
+                key={preset}
+                className="rounded-full border border-slate-200 px-2 py-1 text-[11px] font-semibold text-slate-700"
+                onClick={() => setForm((prev) => ({ ...prev, time: preset }))}
+              >
+                {preset}
+              </button>
+            ))}
+          </div>
+        )}
+
+        <div className="mt-3 grid grid-cols-6 gap-1.5">
+          <button
+            className={`rounded-lg border px-2 py-2 text-xs font-semibold ${
+              form.playerCap === '' ? 'border-slate-900 bg-slate-900 text-white' : 'border-slate-200 bg-slate-50 text-slate-700'
+            }`}
+            onClick={() => setForm((prev) => ({ ...prev, playerCap: '' }))}
+          >
+            Team
+          </button>
+          {activeRoster.map((player) => (
+            <button
+              key={player.id}
+              className={`rounded-lg border px-2 py-2 text-xs font-semibold ${
+                form.playerCap === player.capNumber
+                  ? 'border-slate-900 bg-slate-900 text-white'
+                  : 'border-slate-200 bg-slate-50 text-slate-700'
+              }`}
+              onClick={() => setForm((prev) => ({ ...prev, playerCap: player.capNumber }))}
+            >
+              #{player.capNumber}
+            </button>
+          ))}
+        </div>
+
+        {showInAppHints && (
+          <div className="mt-3 rounded-lg border border-cyan-200 bg-cyan-50 px-2.5 py-2 text-[11px] font-semibold text-cyan-800">
+            1) Set period/time · 2) Select player · 3) Tap action to add it instantly.
+          </div>
+        )}
+
+        <div className="mt-2 grid grid-cols-2 gap-1.5">
+          {SCORING_EVENTS.map((evt) => (
+            <button
+              key={`mobile_${evt.key}`}
+              className={`rounded-lg px-2 py-2 text-xs font-semibold text-white ${evt.color} ${
+                form.type === evt.key ? 'ring-2 ring-slate-900/40 ring-offset-1' : ''
+              }`}
+              onClick={() => {
+                if (editingEventId) {
+                  setForm((prev) => ({ ...prev, type: evt.key }));
+                } else {
+                  setForm((prev) => ({ ...prev, type: evt.key }));
+                  saveEvent(evt.key);
+                }
+              }}
+            >
+              {editingEventId ? evt.label : `+ ${evt.label}`}
+            </button>
+          ))}
+        </div>
+
+        {editingEventId && (
+          <div className="mt-3 flex items-center gap-2 text-xs text-slate-600">
+            <span>Editing event</span>
+            <button
+              className="rounded-lg bg-slate-900 px-2.5 py-1.5 text-xs font-semibold text-white"
+              onClick={() => saveEvent(form.type)}
+            >
+              Save
+            </button>
+            <button className="font-semibold text-slate-700" onClick={resetForm}>
+              Cancel
+            </button>
+          </div>
+        )}
+
+        <div className="mt-3 rounded-lg border border-slate-200 p-2">
+          <div className="flex items-center justify-between gap-2">
+            <button
+              className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-500"
+              onClick={() => setShowMobileLog((prev) => !prev)}
+            >
+              {showMobileLog ? 'Hide' : 'Show'} event log ({matchEventsSorted.length})
+            </button>
+            {liveMode && (
+              <button
+                className={`rounded-md px-2 py-1 text-[11px] font-semibold ${
+                  liveGuard ? 'bg-amber-100 text-amber-800' : 'bg-slate-800 text-white'
+                }`}
+                onClick={() => setLiveGuard((prev) => !prev)}
+              >
+                {liveGuard ? 'Unlock edits' : 'Lock edits'}
+              </button>
+            )}
+          </div>
+          {showMobileLog && (
+            <div className="mt-2 max-h-[22vh] space-y-1.5 overflow-y-auto pr-1">
+              {matchEventsSorted.length === 0 && (
+                <div className="rounded-lg border border-slate-100 px-2 py-2 text-xs text-slate-500">
+                  No events logged for the selected match.
+                </div>
+              )}
+              {matchEventsSorted.map((evt) => {
+                const playerLabel = evt.playerCap ? `#${evt.playerCap}` : 'Team';
+                const typeLabel = getScoringEventMeta(evt.type).label;
+                return (
+                  <div key={`mobile_event_${evt.id}`} className="rounded-lg border border-slate-100 px-2 py-2 text-xs">
+                    <div className="font-semibold text-slate-700">
+                      {typeLabel} | {playerLabel}
+                    </div>
+                    <div className="text-slate-500">
+                      P{evt.period} · {evt.time}
+                    </div>
+                    <div className="mt-1 flex items-center gap-2 font-semibold">
+                      <button
+                        className="text-slate-500"
+                        disabled={liveMode && liveGuard}
+                        onClick={() => {
+                          setEditingEventId(evt.id);
+                          setForm({
+                            type: evt.type,
+                            playerCap: evt.playerCap,
+                            period: evt.period,
+                            time: evt.time
+                          });
+                        }}
+                      >
+                        Edit
+                      </button>
+                      <button
+                        className="text-red-500 disabled:opacity-40"
+                        disabled={liveMode && liveGuard}
+                        onClick={() => deleteEvent(evt)}
+                      >
+                        Delete
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+
+        {!compactAppFullscreen && (
+          <div className="mt-3 rounded-lg border border-slate-200 p-2">
+            <button
+              className="cursor-pointer text-xs font-semibold uppercase tracking-[0.12em] text-slate-500"
+              onClick={() => setShowMobileAdvanced((prev) => !prev)}
+            >
+              {showMobileAdvanced ? 'Hide advanced' : 'Show advanced'}
+            </button>
+            {showMobileAdvanced && (
+              <>
+                {videoUrl && (
+                  <div className="mt-2 overflow-hidden rounded-lg border border-slate-200 bg-black">
+                    <video
+                      ref={videoElementRef}
+                      className="h-auto max-h-[220px] w-full object-contain"
+                      controls
+                      playsInline
+                      src={videoUrl}
+                    />
+                  </div>
+                )}
+                <div className="mt-2 text-xs text-slate-500">
+                  Team stats: goals {stats.totals.shot_goal} · shots {stats.shots} · shot conversion{' '}
+                  {stats.shotConversion}% · personal fouls {stats.personalFouls}
+                </div>
+              </>
+            )}
+          </div>
+        )}
+      </div>
+
+      {error && (
+        <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+          {error}
+        </div>
+      )}
+
+      <div className={showDesktopLayout ? 'hidden grid-cols-1 gap-4 md:grid xl:grid-cols-[1.45fr_0.95fr]' : 'hidden'}>
+        <div className="space-y-4">
+          <div className="rounded-2xl bg-white p-4 shadow-sm">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+              <div className="min-w-0 flex-1">
+                <label className="text-xs font-semibold text-slate-500">Selected match</label>
+                <select
+                  aria-label="Scoring selected match"
+                  className="mt-2 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm"
+                  value={currentMatchId}
+                  onChange={(event) => setCurrentMatchId(event.target.value)}
+                >
+                  {matches.length === 0 && <option value="">No matches</option>}
+                  {sortedMatches.map((match) => (
+                    <option key={match.id} value={match.id}>
+                      {match.name}
+                      {match.opponent_name ? ` vs ${match.opponent_name}` : ''} · {match.date}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <ToolbarButton
+                className="px-3 py-1 text-xs text-slate-600"
+                onClick={undoLastEvent}
+                disabled={!currentMatchId}
+              >
+                Undo last
+              </ToolbarButton>
+            </div>
+            <div className="mt-2 text-xs font-semibold text-slate-500">{savedLabel}</div>
+            {matches.length === 0 && (
+              <div className="mt-3">
+                <ModuleEmptyState
+                  compact
+                  title="No matches found"
+                  description="Create a match first. Scoring is tied to one selected match."
+                  actions={[
+                    {
+                      label: 'Open Matches',
+                      onClick: () => onOpenModule?.('matches')
+                    }
+                  ]}
+                />
+              </div>
+            )}
+            <div className="mt-4 grid grid-cols-1 gap-3 lg:grid-cols-[180px_1fr]">
+              <div>
+                <label className="text-xs font-semibold text-slate-500">Period</label>
+                <select
+                  aria-label="Scoring period"
+                  className="mt-2 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm"
+                  value={form.period}
+                  onChange={(event) => setForm((prev) => ({ ...prev, period: event.target.value }))}
+                >
+                  {periods.map((period) => (
+                    <option key={period} value={period}>
+                      P{period}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="text-xs font-semibold text-slate-500">Time</label>
+                <div className="mt-2 grid gap-3 sm:grid-cols-[auto_auto_auto_1fr] sm:items-center">
+                  <div className="flex items-center gap-2">
+                    <div className="flex flex-col gap-1">
+                      <button
+                        className="h-8 w-8 rounded-lg border border-slate-200 bg-slate-50 text-base font-bold text-slate-700 sm:h-9 sm:w-9"
+                        onClick={() => adjustMinutes(1)}
+                      >
+                        ▲
+                      </button>
+                      <button
+                        className="h-8 w-8 rounded-lg border border-slate-200 bg-slate-50 text-base font-bold text-slate-700 sm:h-9 sm:w-9"
+                        onClick={() => adjustMinutes(-1)}
+                      >
+                        ▼
+                      </button>
+                    </div>
+                    <div className="w-14 rounded-lg border border-slate-200 bg-white py-2 text-center text-base font-semibold sm:w-16 sm:text-lg">
+                      {String(splitTimeParts(form.time).minutes).padStart(2, '0')}
+                    </div>
+                  </div>
+                  <span className="hidden text-sm font-semibold text-slate-500 sm:block">:</span>
+                  <div className="flex items-center gap-2">
+                    <div className="flex flex-col gap-1">
+                      <button
+                        className="h-8 w-8 rounded-lg border border-slate-200 bg-slate-50 text-base font-bold text-slate-700 sm:h-9 sm:w-9"
+                        onPointerDown={(event) => startSecondsHold(1, event)}
+                        onPointerUp={clearSecondsHold}
+                        onPointerLeave={clearSecondsHold}
+                        onPointerCancel={clearSecondsHold}
+                        onKeyDown={(event) => {
+                          if (event.key === 'Enter' || event.key === ' ') {
+                            event.preventDefault();
+                            adjustSeconds(1);
+                          }
+                        }}
+                      >
+                        ▲
+                      </button>
+                      <button
+                        className="h-8 w-8 rounded-lg border border-slate-200 bg-slate-50 text-base font-bold text-slate-700 sm:h-9 sm:w-9"
+                        onPointerDown={(event) => startSecondsHold(-1, event)}
+                        onPointerUp={clearSecondsHold}
+                        onPointerLeave={clearSecondsHold}
+                        onPointerCancel={clearSecondsHold}
+                        onKeyDown={(event) => {
+                          if (event.key === 'Enter' || event.key === ' ') {
+                            event.preventDefault();
+                            adjustSeconds(-1);
+                          }
+                        }}
+                      >
+                        ▼
+                      </button>
+                    </div>
+                    <div className="w-14 rounded-lg border border-slate-200 bg-white py-2 text-center text-base font-semibold sm:w-16 sm:text-lg">
+                      {String(splitTimeParts(form.time).seconds).padStart(2, '0')}
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-2 gap-1 sm:flex sm:flex-col">
+                    <button
+                      className="h-8 rounded-lg border border-slate-200 bg-slate-50 px-3 text-xs font-semibold text-slate-700 sm:h-9"
+                      onClick={() => adjustSeconds(10)}
+                    >
+                      +10s
+                    </button>
+                    <button
+                      className="h-8 rounded-lg border border-slate-200 bg-slate-50 px-3 text-xs font-semibold text-slate-700 sm:h-9"
+                      onClick={() => adjustSeconds(-10)}
+                    >
+                      -10s
+                    </button>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-1 text-[11px] font-semibold text-slate-600">
+                    {timePresets.map((preset) => (
+                      <button
+                        key={preset}
+                        className="rounded-full border border-slate-200 px-2 py-1"
+                        onClick={() => setForm((prev) => ({ ...prev, time: preset }))}
+                      >
+                        {preset}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div className="mt-3 text-xs font-semibold text-slate-500">
+              {isUsingMatchLineup
+                ? `Using match lineup (${activeRoster.length} selected).`
+                : 'No lineup selected for this match. Using full team roster.'}
+            </div>
+
+            {showInAppHints && (
+              <div className="mt-4 rounded-lg border border-cyan-200 bg-cyan-50 px-3 py-2 text-xs font-semibold text-cyan-800">
+                Set period/time and player first. Clicking an action button logs the event immediately.
+              </div>
+            )}
+
+            <div className="mt-3 grid gap-4 xl:grid-cols-2">
+              <div>
+                <h3 className="text-sm font-semibold text-slate-700">Player</h3>
+                <div className="mt-2 grid grid-cols-5 gap-2 sm:grid-cols-6 lg:grid-cols-4">
+                  <button
+                    className={`rounded-xl border px-2 py-2 text-sm font-semibold ${
+                      form.playerCap === '' ? 'border-slate-900 bg-slate-900 text-white' : 'border-slate-200 bg-slate-50 text-slate-700'
+                    }`}
+                    onClick={() => setForm((prev) => ({ ...prev, playerCap: '' }))}
+                  >
+                    Team
+                  </button>
+                  {activeRoster.map((player) => (
+                    <button
+                      key={player.id}
+                      className={`rounded-xl border px-2 py-2 text-sm font-semibold ${
+                        form.playerCap === player.capNumber
+                          ? 'border-slate-900 bg-slate-900 text-white'
+                          : 'border-slate-200 bg-slate-50 text-slate-700'
+                      }`}
+                      onClick={() => setForm((prev) => ({ ...prev, playerCap: player.capNumber }))}
+                    >
+                      #{player.capNumber}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div>
+                <h3 className="text-sm font-semibold text-slate-700">Action</h3>
+                <div className="mt-2 grid grid-cols-1 gap-2 2xl:grid-cols-2">
+                  {['shots', 'discipline', 'possession', 'team'].map((group) => {
+                    const groupItems = SCORING_EVENTS.filter((evt) => evt.group === group);
+                    if (groupItems.length === 0) return null;
+                    return (
+                      <div key={group} className="space-y-2">
+                        <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400">
+                          {group}
+                        </div>
+                        <div className="grid grid-cols-2 gap-2">
+                          {groupItems.map((evt) => (
+                            <button
+                              key={evt.key}
+                              className={`rounded-xl px-3 py-2 text-xs font-semibold text-white sm:text-sm ${evt.color} ${
+                                form.type === evt.key ? 'ring-2 ring-slate-900/40 ring-offset-1' : ''
+                              }`}
+                              onClick={() => {
+                                if (editingEventId) {
+                                  setForm((prev) => ({ ...prev, type: evt.key }));
+                                } else {
+                                  setForm((prev) => ({ ...prev, type: evt.key }));
+                                  saveEvent(evt.key);
+                                }
+                              }}
+                            >
+                              {editingEventId ? evt.label : `+ ${evt.label}`}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+            {editingEventId && (
+              <div className="mt-3 flex items-center gap-2 text-xs text-slate-500">
+                Editing event ·
+                <button className="rounded-lg bg-slate-900 px-3 py-1.5 text-xs font-semibold text-white" onClick={() => saveEvent(form.type)}>
+                  Save changes
+                </button>
+                <button className="font-semibold text-slate-700" onClick={resetForm}>
+                  Cancel edit
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+
+        <div className="space-y-4">
+          {videoUrl && (
+            <div className="rounded-2xl bg-white p-4 shadow-sm">
+              <div className="flex items-center justify-between gap-3">
+                <h3 className="text-sm font-semibold text-slate-700">Video assist</h3>
+                <div className="max-w-[60%] truncate text-xs text-slate-500">{videoName}</div>
+              </div>
+              <div className="mt-3 overflow-hidden rounded-xl border border-slate-200 bg-black">
+                <video
+                  ref={videoElementRef}
+                  className="h-auto max-h-[340px] w-full object-contain"
+                  controls
+                  playsInline
+                  src={videoUrl}
+                />
+              </div>
+              <div className="mt-2 text-xs text-slate-500">
+                Video stays local in your browser session and is not uploaded.
+              </div>
+            </div>
+          )}
+
+          <div className="rounded-2xl bg-white p-4 shadow-sm">
+            <div className="flex items-center justify-between gap-2">
+              <h3 className="text-sm font-semibold text-slate-700">Event log (selected match)</h3>
+              {liveMode && (
+                <button
+                  className={`rounded-md px-2 py-1 text-[11px] font-semibold ${
+                    liveGuard ? 'bg-amber-100 text-amber-800' : 'bg-slate-800 text-white'
+                  }`}
+                  onClick={() => setLiveGuard((prev) => !prev)}
+                >
+                  {liveGuard ? 'Unlock edits' : 'Lock edits'}
+                </button>
+              )}
+            </div>
+            <div
+              className={`mt-3 space-y-2 overflow-y-auto pr-1 text-sm text-slate-600 ${
+                videoUrl ? 'max-h-[300px]' : 'max-h-[420px]'
+              }`}
+            >
+              {matchEventsSorted.length === 0 && (
+                <ModuleEmptyState
+                  compact
+                  title="No events logged yet"
+                  description={
+                    currentMatchId
+                      ? 'Choose a player and an action to record the first event for this match.'
+                      : 'Select a match first before logging events.'
+                  }
+                  actions={
+                    currentMatchId
+                      ? []
+                      : [
+                          {
+                            label: 'Open Matches',
+                            onClick: () => onOpenModule?.('matches')
+                          }
+                        ]
+                  }
+                />
+              )}
+              {matchEventsSorted.map((evt) => {
+                const matchData = matches.find((match) => match.id === evt.matchId);
+                const matchName = matchData?.name || 'Match';
+                const matchOpponent = matchData?.opponent_name ? ` vs ${matchData.opponent_name}` : '';
+                const playerLabel = evt.playerCap ? `#${evt.playerCap}` : 'Team';
+                const typeLabel = getScoringEventMeta(evt.type).label;
+                return (
+                  <div key={evt.id} className="flex items-center justify-between gap-3 rounded-lg border border-slate-100 px-3 py-2">
+                    <div>
+                      <div className="font-semibold text-slate-700">
+                        {typeLabel} · {playerLabel}
+                      </div>
+                      <div className="text-xs text-slate-500">
+                        {matchName}
+                        {matchOpponent} · P{evt.period} · {evt.time}
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2 text-xs font-semibold">
+                      <button
+                        className="text-slate-500 disabled:opacity-40"
+                        disabled={liveMode && liveGuard}
+                        onClick={() => {
+                          setEditingEventId(evt.id);
+                          setForm({
+                            type: evt.type,
+                            playerCap: evt.playerCap,
+                            period: evt.period,
+                            time: evt.time
+                          });
+                        }}
+                      >
+                        Edit
+                      </button>
+                      <button
+                        className="text-red-500 disabled:opacity-40"
+                        disabled={liveMode && liveGuard}
+                        onClick={() => deleteEvent(evt)}
+                      >
+                        Delete
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          {!liveMode && (
+            <div className="rounded-2xl bg-white p-4 shadow-sm">
+              <h3 className="text-sm font-semibold text-slate-700">Stats scope</h3>
+              <label className="mt-3 block text-xs font-semibold text-slate-500">Match selection</label>
+              <select
+                className="mt-2 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm"
+                value={statsMatchId}
+                onChange={(event) => setStatsMatchId(event.target.value)}
+              >
+                <option value="">All matches</option>
+                {sortedMatches.map((match) => (
+                  <option key={match.id} value={match.id}>
+                    {match.name}
+                    {match.opponent_name ? ` vs ${match.opponent_name}` : ''} · {match.date}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+
+          {!liveMode && (
+            <div className="rounded-2xl bg-white p-4 shadow-sm">
+            <h3 className="text-sm font-semibold text-slate-700">Team stats</h3>
+            <div className="mt-3 grid grid-cols-2 gap-3 text-sm text-slate-600">
+              <div className="rounded-lg border border-slate-100 px-3 py-2">
+                <StatTooltipLabel label="Shot goals" tooltip={SCORING_TOOLTIPS.shotGoals} enabled={showTooltips} />{' '}
+                <span className="font-semibold text-slate-900">{stats.totals.shot_goal}</span>
+              </div>
+              <div className="rounded-lg border border-slate-100 px-3 py-2">
+                <StatTooltipLabel label="Shots" tooltip={SCORING_TOOLTIPS.shots} enabled={showTooltips} />{' '}
+                <span className="font-semibold text-slate-900">{stats.shots}</span>
+              </div>
+              <div className="rounded-lg border border-slate-100 px-3 py-2">
+                <StatTooltipLabel
+                  label="Exclusion fouls"
+                  tooltip={SCORING_TOOLTIPS.exclusions}
+                  enabled={showTooltips}
+                />{' '}
+                <span className="font-semibold text-slate-900">{stats.totals.exclusion_foul}</span>
+              </div>
+              <div className="rounded-lg border border-slate-100 px-3 py-2">
+                <StatTooltipLabel
+                  label="Personal fouls"
+                  tooltip={SCORING_TOOLTIPS.personalFouls}
+                  enabled={showTooltips}
+                />{' '}
+                <span className="font-semibold text-slate-900">{stats.personalFouls}</span>
+              </div>
+              <div className="rounded-lg border border-slate-100 px-3 py-2">
+                <StatTooltipLabel
+                  label="Penalty fouls"
+                  tooltip={SCORING_TOOLTIPS.penaltyFouls}
+                  enabled={showTooltips}
+                />{' '}
+                <span className="font-semibold text-slate-900">{stats.totals.penalty_foul}</span>
+              </div>
+              <div className="rounded-lg border border-slate-100 px-3 py-2">
+                <StatTooltipLabel
+                  label="Ordinary fouls"
+                  tooltip={SCORING_TOOLTIPS.ordinaryFouls}
+                  enabled={showTooltips}
+                />{' '}
+                <span className="font-semibold text-slate-900">{stats.totals.ordinary_foul}</span>
+              </div>
+              <div className="rounded-lg border border-slate-100 px-3 py-2">
+                <StatTooltipLabel
+                  label="Misconduct"
+                  tooltip={SCORING_TOOLTIPS.misconducts}
+                  enabled={showTooltips}
+                />{' '}
+                <span className="font-semibold text-slate-900">{stats.totals.misconduct}</span>
+              </div>
+              <div className="rounded-lg border border-slate-100 px-3 py-2">
+                <StatTooltipLabel
+                  label="Violent action"
+                  tooltip={SCORING_TOOLTIPS.violentActions}
+                  enabled={showTooltips}
+                />{' '}
+                <span className="font-semibold text-slate-900">{stats.totals.violent_action}</span>
+              </div>
+              <div className="rounded-lg border border-slate-100 px-3 py-2">
+                <StatTooltipLabel
+                  label="Turnovers won"
+                  tooltip={SCORING_TOOLTIPS.turnoversWon}
+                  enabled={showTooltips}
+                />{' '}
+                <span className="font-semibold text-slate-900">{stats.totals.turnover_won}</span>
+              </div>
+              <div className="rounded-lg border border-slate-100 px-3 py-2">
+                <StatTooltipLabel
+                  label="Turnovers lost"
+                  tooltip={SCORING_TOOLTIPS.turnoversLost}
+                  enabled={showTooltips}
+                />{' '}
+                <span className="font-semibold text-slate-900">{stats.totals.turnover_lost}</span>
+              </div>
+              <div className="rounded-lg border border-slate-100 px-3 py-2">
+                <StatTooltipLabel
+                  label="Timeouts"
+                  tooltip={SCORING_TOOLTIPS.timeouts}
+                  enabled={showTooltips}
+                />{' '}
+                <span className="font-semibold text-slate-900">{stats.totals.timeout}</span>
+              </div>
+            </div>
+            <div className="mt-3 text-xs text-slate-500">Scoring now treats shots and fouls as separate live stats inputs.</div>
+            <div className="mt-2 grid grid-cols-2 gap-3 text-sm text-slate-600">
+              <div className="rounded-lg border border-slate-100 px-3 py-2">
+                <StatTooltipLabel
+                  label="Shot conversion"
+                  tooltip={SCORING_TOOLTIPS.shotConversion}
+                  enabled={showTooltips}
+                />{' '}
+                <span className="font-semibold text-emerald-700">{stats.shotConversion}%</span>
+              </div>
+            </div>
+            </div>
+          )}
+
+          {!liveMode && (
+            <div className="rounded-2xl bg-white p-4 shadow-sm">
+            <h3 className="text-sm font-semibold text-slate-700">Player stats</h3>
+            <div className="mt-3 space-y-2 text-sm text-slate-600">
+              {Object.keys(stats.playerStats).length === 0 && <div>No player events logged.</div>}
+              {Object.entries(stats.playerStats).map(([cap, data]) => (
+                <div key={cap} className="rounded-lg border border-slate-100 px-3 py-2">
+                  <div className="font-semibold text-slate-700">#{cap}</div>
+                  <div className="mt-1 grid grid-cols-2 gap-2 text-xs text-slate-500">
+                    <span>Shots: {data.shots}</span>
+                    <span>Shot goals: {data.shotGoals}</span>
+                    <span>Personal fouls: {data.personalFouls}</span>
+                    <span>Ordinary fouls: {data.ordinaryFouls}</span>
+                    <span>Won: {data.turnoversWon}</span>
+                    <span>Lost: {data.turnoversLost}</span>
+                    <span>Misconduct: {data.misconducts}</span>
+                    <span>Violent action: {data.violentActions}</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {editingLineup && (
+        <div className="fixed inset-0 z-[95] flex items-end bg-slate-900/40 p-3 sm:items-center sm:justify-center">
+          <button className="absolute inset-0" onClick={() => setEditingLineup(false)} />
+          <div className="relative max-h-[85vh] w-full max-w-xl overflow-hidden rounded-2xl bg-white shadow-2xl">
+            <div className="flex items-center justify-between border-b border-slate-200 px-4 py-3">
+              <div>
+                <h3 className="text-sm font-semibold text-slate-900">Match lineup</h3>
+                <p className="text-xs text-slate-500">
+                  {Object.values(lineupSelection).filter(Boolean).length} selected
+                </p>
+              </div>
+              <button className="text-sm font-semibold text-slate-500" onClick={() => setEditingLineup(false)}>
+                Close
+              </button>
+            </div>
+            <div className="max-h-[58vh] overflow-y-auto px-4 py-3">
+              <div className="grid gap-2 sm:grid-cols-2">
+                {allRoster.map((player) => {
+                  const key = getLineupSelectionKey(player);
+                  return (
+                    <label key={key} className="flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-2 text-sm">
+                      <input
+                        type="checkbox"
+                        checked={Boolean(lineupSelection[key])}
+                        onChange={(event) =>
+                          setLineupSelection((prev) => ({
+                            ...prev,
+                            [key]: event.target.checked
+                          }))
+                        }
+                      />
+                      <span className="font-semibold text-slate-700">#{player.capNumber}</span>
+                      <span className="text-slate-500">{player.name}</span>
+                    </label>
+                  );
+                })}
+              </div>
+            </div>
+            <div className="flex items-center justify-end gap-2 border-t border-slate-200 px-4 py-3">
+              <button
+                className="rounded-lg border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-700"
+                onClick={() => setEditingLineup(false)}
+              >
+                Cancel
+              </button>
+              <button
+                className="rounded-lg bg-slate-900 px-3 py-2 text-sm font-semibold text-white disabled:opacity-50"
+                onClick={saveLineup}
+                disabled={savingLineup}
+              >
+                Save lineup
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+export default ScoringView;
